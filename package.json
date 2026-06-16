@@ -19,12 +19,14 @@
     "memory",
     "compaction"
   ],
+  "main": "./index.ts",
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./index.ts"
     ]
   },
   "files": [
+    "index.ts",
     "src/",
     "LICENSE",
     "README.md"
