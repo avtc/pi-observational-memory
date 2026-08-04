@@ -326,6 +326,117 @@ describe("compaction hook", () => {
 		const notifyMessages = notify.mock.calls.map(([message]) => String(message));
 		expect(notifyMessages.some((message) => message.includes("no new observations") && message.includes("carrying forward"))).toBe(true);
 	});
+
+	// Builds a compaction-hook harness with a delta that triggers the reflector/pruner gate.
+	// `agentLoopImpl` controls per-agent-loop behavior, keyed by the registered tool name
+	// (record_observations = sync catch-up observer, record_reflections = reflector,
+	// drop_observations = pruner).
+	function buildReflectPruneHarness(agentLoopImpl: (...args: any[]) => any) {
+		agentLoopMock.mockReset();
+		agentLoopMock.mockImplementation(agentLoopImpl);
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const shortObservation: ObservationRecord = {
+			id: "111111111111",
+			timestamp: "2026-05-02 10:30",
+			relevance: "medium",
+			content: "x",
+			sourceEntryIds: ["source-entry"],
+		};
+		const contentOnlyTokens = estimateStringTokens(shortObservation.content);
+		const renderedTokens = observationPoolTokens([shortObservation]);
+		const threshold = contentOnlyTokens + 1;
+		expect(renderedTokens).toBeGreaterThan(threshold);
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			resolveFailureNotified: false,
+			config: {
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: threshold,
+				passive: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		const entries = [
+			messageEntry({ id: "source-entry", message: { role: "user", content: "source" } }),
+			observationEntry({
+				id: "observation-entry",
+				data: {
+					records: [shortObservation],
+					coversFromId: "source-entry",
+					coversUpToId: "source-entry",
+					tokenCount: contentOnlyTokens,
+				},
+			}),
+			messageEntry({ id: "kept-entry", message: { role: "user", content: "kept tail" } }),
+		];
+		const notify = vi.fn();
+		const event = {
+			preparation: { firstKeptEntryId: "kept-entry", tokensBefore: 123 },
+			branchEntries: entries,
+			signal: undefined,
+		};
+		const ctx = {
+			cwd: "/tmp/project",
+			hasUI: true,
+			ui: { notify, setWidget: vi.fn() },
+			sessionManager: { getBranch: vi.fn(() => entries) },
+		};
+		return { run: () => handler!(event, ctx), notify, pi };
+	}
+
+	it("cancels compaction when the reflector fails because the model/API is unavailable", async () => {
+		// Simulates a dead compaction model server: every reflector call throws, while the
+		// sync catch-up observer still drains (empty). The reflector must surface this as
+		// a failed pass, and the hook must cancel instead of proceeding with an unreflected summary.
+		const { run, notify, pi } = buildReflectPruneHarness((_prompts, context) => {
+			if (context.tools[0].name === "record_reflections") {
+				throw new Error("connect ECONNREFUSED 127.0.0.1:1234");
+			}
+			return emptyAgentStream();
+		});
+
+		const result = await run();
+
+		expect(result).toEqual({ cancel: true });
+		const notifyMessages = notify.mock.calls.map(([message]) => String(message));
+		expect(notifyMessages.some((m) => m.includes("reflector failed") && m.includes("Cancelling compaction"))).toBe(true);
+		// No compaction details produced — Pi will not prune raw conversation
+		expect((result as any).compaction).toBeUndefined();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
+
+	it("cancels compaction when the pruner fails after a successful reflector", async () => {
+		// Reflector drains fine (empty passes), but the pruner's agent loop throws.
+		// fellBack must cancel compaction rather than silently keeping the unpruned pool.
+		const { run, notify, pi } = buildReflectPruneHarness((_prompts, context) => {
+			if (context.tools[0].name === "drop_observations") {
+				throw new Error("connect ECONNREFUSED 127.0.0.1:1234");
+			}
+			return emptyAgentStream();
+		});
+
+		const result = await run();
+
+		expect(result).toEqual({ cancel: true });
+		const notifyMessages = notify.mock.calls.map(([message]) => String(message));
+		expect(notifyMessages.some((m) => m.includes("pruner failed") && m.includes("Cancelling compaction"))).toBe(true);
+		expect((result as any).compaction).toBeUndefined();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+	});
 });
 
 describe("renderSummary", () => {

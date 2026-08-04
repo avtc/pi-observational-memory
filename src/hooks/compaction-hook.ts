@@ -440,6 +440,20 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						afterReflections: finalReflections.length,
 					});
 
+					// A failed reflector pass means the model/API was unavailable (e.g. local
+					// model server not started). Without reflection, the compaction summary would
+					// misrepresent the memory and Pi would prune raw conversation that was never
+					// crystallized — silent data loss. Cancel so the user can fix the model and retry.
+					if (reflectorResult.stats.failedPass !== undefined) {
+						debugLog("compaction.reflector.failed_cancel", { failedPass: reflectorResult.stats.failedPass });
+						if (hasUI) ui?.notify(
+							`Observational memory: reflector failed on pass ${reflectorResult.stats.failedPass} (model/API error). ` +
+								"Cancelling compaction — check the compaction model/server (e.g. is your local model server running?) and try /compact again.",
+							"error",
+						);
+						return { cancel: true };
+					}
+
 					const prunerResult = await runPruner(
 						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 						finalReflections,
@@ -457,22 +471,32 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						afterObservations: finalObservations.length,
 					});
 					updateWidget();
+					// fellBack means the pruner agent loop threw (model/API unavailable). Same
+					// rationale as the reflector guard: proceeding would compact with an
+					// unpruned pool and prune raw conversation underneath it — data loss.
+					if (prunerResult.fellBack) {
+						debugLog("compaction.pruner.failed_cancel", {});
+						if (hasUI) ui?.notify(
+							"Observational memory: pruner failed (model/API error). Cancelling compaction — " +
+								"check the compaction model/server (e.g. is your local model server running?) and try /compact again.",
+							"error",
+						);
+						return { cancel: true };
+					}
 					if (hasUI) {
 						ui?.notify(
 							`Observational memory: diagnostics — ${formatReflectorStats(reflectorResult.stats)}; coverage ${formatCoverageCounts(coverageBefore)} → ${formatCoverageCounts(coverageAfter)}; ${formatPrunerStats(prunerResult)}`,
 							"info",
 						);
 					}
-					if (prunerResult.fellBack && hasUI) {
-						ui?.notify(
-							"Observational memory: pruner run failed; kept observation set unchanged",
-							"warning",
-						);
-					}
 				} catch (error) {
 					const msg = error instanceof Error ? error.message : String(error);
 					debugLog("compaction.reflect_prune.error", { errorMessage: msg });
-					if (hasUI) ui?.notify(`Observational memory: reflect/prune failed: ${msg}`, "warning");
+					if (hasUI) ui?.notify(
+						`Observational memory: reflect/prune failed: ${msg}. Cancelling compaction — check the compaction model/server and try /compact again.`,
+						"error",
+					);
+					return { cancel: true };
 				}
 			}
 
