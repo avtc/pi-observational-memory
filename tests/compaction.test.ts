@@ -512,7 +512,7 @@ describe("compaction hook", () => {
 			hasUI: false,
 			ui: { notify: vi.fn(), setWidget: vi.fn() },
 			sessionManager: { getBranch: vi.fn(() => entries) },
-		})) as { compaction?: { usage?: Record<string, unknown>; details?: { compactionStages?: Record<string, unknown> } } };
+		})) as { compaction?: { usage?: Record<string, unknown>; details?: { compactionStages?: { observer?: { input?: number }; reflector?: { input?: number }; pruner?: { input?: number } } } } };
 
 		const usage = result.compaction?.usage;
 		expect(usage).toBeDefined();
@@ -526,8 +526,14 @@ describe("compaction hook", () => {
 		// cost is an object with a finite total
 		expect(typeof usage?.cost).toBe("object");
 		expect(Number.isFinite(usage?.cost?.total)).toBe(true);
-		// per-stage breakdown present in details
-		expect(result.compaction?.details?.compactionStages).toBeDefined();
+		// per-stage breakdown present in details — each stage's onEvent wiring is checked
+		// individually (a regression dropping ONE stage would keep the aggregate >0 from
+		// the others → silent pass). Reflector + pruner run with threshold:1; the catch-up
+		// observer runs on the unobserved gap.
+		const stages = result.compaction?.details?.compactionStages;
+		expect(stages).toBeDefined();
+		expect(stages?.reflector?.input).toBeGreaterThan(0);
+		expect(stages?.pruner?.input).toBeGreaterThan(0);
 	});
 });
 
