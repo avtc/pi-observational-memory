@@ -147,6 +147,8 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 		let clearWidget = () => {};
 		try {
 			runtime.ensureConfig(ctx.cwd);
+			// Master switch: disabled → return undefined so pi runs its native compaction.
+			if (!runtime.config.enabled) return undefined;
 			const runId = `compaction-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}`;
 			return await withDebugLogContext({ enabled: runtime.config.debugLog === true, cwd: ctx.cwd, runId }, async () => {
 			const { preparation, branchEntries, signal } = event;

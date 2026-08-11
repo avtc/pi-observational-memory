@@ -172,6 +172,7 @@ describe("compaction hook", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: threshold,
@@ -263,6 +264,7 @@ describe("compaction hook", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: 1,
@@ -368,6 +370,7 @@ describe("compaction hook", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: threshold,
@@ -479,6 +482,7 @@ describe("compaction hook", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: 1, // force reflector/pruner to run
@@ -587,5 +591,57 @@ describe("renderSummary", () => {
 		expect(REFLECTOR_SYSTEM).toContain("supportingObservationIds");
 		expect(REFLECTOR_SYSTEM).toContain("Never invent supporting observation ids");
 		expect(REFLECTOR_SYSTEM).toContain("will be rejected and not recorded");
+	});
+});
+
+describe("compaction hook enabled gate", () => {
+	it("returns undefined when enabled=false so pi runs native compaction", async () => {
+		agentLoopMock.mockReset();
+		agentLoopMock.mockImplementation(() => emptyAgentStream());
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			resolveFailureNotified: false,
+			config: {
+				enabled: false,
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 1,
+				passive: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		const ctx = {
+			cwd: "/tmp/project",
+			sessionManager: {
+				getBranch: vi.fn(() => []),
+			},
+			hasUI: true,
+			ui: { notify: vi.fn() },
+		};
+		const event = { preparation: { firstKeptEntryId: "a", tokensBefore: 0 }, branchEntries: [], signal: undefined };
+
+		const result = await handler(event, ctx);
+
+		expect(result).toBeUndefined();
+		expect(runtime.ensureConfig).toHaveBeenCalledWith(ctx.cwd);
+		expect(runtime.resolveModel).not.toHaveBeenCalled();
+		expect(agentLoopMock).not.toHaveBeenCalled();
+		expect(pi.appendEntry).not.toHaveBeenCalled();
+		// flag reset by finally — no leaked in-flight state
+		expect(runtime.compactHookInFlight).toBe(false);
 	});
 });

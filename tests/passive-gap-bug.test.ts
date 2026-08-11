@@ -179,6 +179,7 @@ describe("gap detection after compaction", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: 30_000,
@@ -307,6 +308,7 @@ describe("gap detection after compaction", () => {
 			observerPromise: null,
 			resolveFailureNotified: false,
 			config: {
+				enabled: true,
 				observationThresholdTokens: 1,
 				compactionThresholdTokens: 50_000,
 				reflectionThresholdTokens: 30_000,

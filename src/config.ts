@@ -4,6 +4,7 @@ import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface Config {
+	enabled: boolean;
 	observationThresholdTokens: number;
 	compactionThresholdTokens: number;
 	reflectionThresholdTokens: number;
@@ -25,6 +26,7 @@ export interface EffectiveTurnLimits {
 }
 
 export const DEFAULTS: Config = {
+	enabled: true,
 	observationThresholdTokens: 1_000,
 	compactionThresholdTokens: 50_000,
 	reflectionThresholdTokens: 30_000,
@@ -37,6 +39,7 @@ export const THINKING_LEVEL_VALUES: readonly ModelThinkingLevel[] = ["off", "min
 
 const SETTINGS_KEY = "observational-memory";
 const PASSIVE_ENV = "PI_OBSERVATIONAL_MEMORY_PASSIVE";
+const ENABLED_ENV = "PI_OBSERVATIONAL_MEMORY_ENABLED";
 const DEFAULT_MAX_TURNS = 16;
 
 function positiveIntegerOrUndefined(value: unknown): number | undefined {
@@ -64,6 +67,7 @@ function normalizeThinkingLevel(normalized: Partial<Config>): void {
 
 function normalizeSettingsConfig(value: Partial<Config>): Partial<Config> {
 	const normalized = { ...value };
+	if ("enabled" in normalized && typeof normalized.enabled !== "boolean") delete normalized.enabled;
 	if ("passive" in normalized && typeof normalized.passive !== "boolean") delete normalized.passive;
 	if ("debugLog" in normalized && typeof normalized.debugLog !== "boolean") delete normalized.debugLog;
 	normalizeTurnLimit(normalized, "observerMaxTurnsPerRun");
@@ -83,12 +87,20 @@ export function resolveTurnLimits(config: Config): EffectiveTurnLimits {
 }
 
 export function readEnvConfig(env: NodeJS.ProcessEnv = process.env): Partial<Config> {
+	const result: Partial<Config> = {};
 	const rawPassive = env[PASSIVE_ENV];
-	if (rawPassive === undefined) return {};
-	const passive = rawPassive.trim().toLowerCase();
-	if (["1", "true", "yes", "on"].includes(passive)) return { passive: true };
-	if (["0", "false", "no", "off"].includes(passive)) return { passive: false };
-	return {};
+	if (rawPassive !== undefined) {
+		const passive = rawPassive.trim().toLowerCase();
+		if (["1", "true", "yes", "on"].includes(passive)) result.passive = true;
+		else if (["0", "false", "no", "off"].includes(passive)) result.passive = false;
+	}
+	const rawEnabled = env[ENABLED_ENV];
+	if (rawEnabled !== undefined) {
+		const enabled = rawEnabled.trim().toLowerCase();
+		if (["1", "true", "yes", "on"].includes(enabled)) result.enabled = true;
+		else if (["0", "false", "no", "off"].includes(enabled)) result.enabled = false;
+	}
+	return result;
 }
 
 function readNamespacedConfig(path: string): Partial<Config> {

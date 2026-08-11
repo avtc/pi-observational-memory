@@ -12,6 +12,7 @@ function passiveRuntime() {
 			runtime.config.passive = true;
 		}),
 		config: {
+			enabled: true,
 			observationThresholdTokens: 1,
 			compactionThresholdTokens: 1,
 			reflectionThresholdTokens: 1,
@@ -122,5 +123,86 @@ describe("/om-status passive mode", () => {
 		expect(message).toContain("proactive extension-triggered compaction is disabled; manual/Pi compaction still uses the custom hook");
 		expect(message).not.toContain("Next observation:");
 		expect(message).not.toContain("Next compaction:");
+	});
+});
+
+describe("enabled gate (master switch)", () => {
+	/** Build a runtime with the given `enabled` value (default true). */
+	function runtimeWithEnabled(enabled: boolean) {
+		const runtime = {
+			ensureConfig: vi.fn(() => {
+				runtime.config.passive = true;
+			}),
+			config: {
+				enabled,
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 1,
+				reflectionThresholdTokens: 1,
+				passive: false,
+			},
+			observerInFlight: false,
+			compactInFlight: false,
+			observerPromise: undefined,
+			launchObserverTask: vi.fn(),
+		};
+		return runtime;
+	}
+
+	function capture(
+		eventName: string,
+		register: (pi: never, runtime: never) => void,
+		enabled: boolean,
+	) {
+		let handler: ((event: unknown, ctx: unknown) => void) | undefined;
+		const pi = {
+			on: vi.fn((name: string, cb: typeof handler) => {
+				expect(name).toBe(eventName);
+				handler = cb;
+			}),
+		};
+		const runtime = runtimeWithEnabled(enabled);
+		register(pi as never, runtime as never);
+		if (!handler) throw new Error(`${eventName} handler was not registered`);
+		return { handler, runtime };
+	}
+
+	it("observer trigger early-returns when enabled=false (no work)", () => {
+		const { handler, runtime } = capture("turn_end", registerObserverTrigger as never, false);
+		const ctx = {
+			cwd: "/tmp/project",
+			sessionManager: {
+				getBranch: vi.fn(() => []),
+				getLeafId: vi.fn(() => "leaf"),
+			},
+			hasUI: true,
+			ui: { notify: vi.fn() },
+		};
+
+		handler({}, ctx);
+
+		expect(runtime.ensureConfig).toHaveBeenCalledWith(ctx.cwd);
+		expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+		expect(runtime.launchObserverTask).not.toHaveBeenCalled();
+	});
+
+	it("compaction trigger early-returns when enabled=false (no compaction scheduled)", () => {
+		const { handler, runtime } = capture("agent_end", registerCompactionTrigger as never, false);
+		const ctx = {
+			cwd: "/tmp/project",
+			sessionManager: { getBranch: vi.fn(() => []) },
+			hasUI: true,
+			ui: { notify: vi.fn() },
+			isIdle: vi.fn(() => true),
+			compact: vi.fn(),
+		};
+
+		handler(
+			{ type: "agent_end", messages: [{ role: "user", content: "hi" }] },
+			ctx,
+		);
+
+		expect(runtime.ensureConfig).toHaveBeenCalledWith(ctx.cwd);
+		expect(runtime.compactInFlight).toBe(false);
+		expect(ctx.compact).not.toHaveBeenCalled();
 	});
 });

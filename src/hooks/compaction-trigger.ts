@@ -13,6 +13,7 @@ const RETRYABLE_ERROR_RE =
 export function registerCompactionTrigger(pi: ExtensionAPI, runtime: Runtime): void {
 	pi.on("agent_end", (event, ctx) => {
 		runtime.ensureConfig(ctx.cwd);
+		if (!runtime.config.enabled) return;
 		if (runtime.config.passive === true) return;
 		if (runtime.compactInFlight) return;
 

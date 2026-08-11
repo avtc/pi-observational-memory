@@ -16,6 +16,7 @@ function captureHandler() {
 	const runtime = {
 		ensureConfig: vi.fn(),
 		config: {
+			enabled: true,
 			observationThresholdTokens: 1,
 			compactionThresholdTokens: 50_000,
 			reflectionThresholdTokens: 1,
@@ -221,5 +222,50 @@ describe("compaction trigger retry guard", () => {
 		);
 
 		expect(runtime.compactInFlight).toBe(false);
+	});
+});
+
+describe("compaction trigger enabled gate", () => {
+	it("early-returns (no compaction) when enabled=false", () => {
+		let handler: ((event: unknown, ctx: unknown) => void) | undefined;
+		const pi = {
+			on: vi.fn((name: string, cb: typeof handler) => {
+				expect(name).toBe("agent_end");
+				handler = cb;
+			}),
+		};
+		const runtime = {
+			ensureConfig: vi.fn(),
+			config: {
+				enabled: false,
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 1,
+				passive: false,
+			},
+			observerInFlight: false,
+			compactInFlight: false,
+			observerPromise: null as Promise<void> | null,
+			launchObserverTask: vi.fn(),
+		};
+		registerCompactionTrigger(pi as never, runtime as never);
+		if (!handler) throw new Error("agent_end handler was not registered");
+
+		const ctx = fakeCtx();
+		handler(
+			{
+				type: "agent_end",
+				messages: [
+					{ role: "user", content: "hello" },
+					{ role: "assistant", content: "done", stopReason: "end_turn" },
+				],
+			},
+			ctx,
+		);
+
+		expect(runtime.ensureConfig).toHaveBeenCalledWith(ctx.cwd);
+		expect(runtime.compactInFlight).toBe(false);
+		expect(ctx.sessionManager.getBranch).not.toHaveBeenCalled();
+		expect(ctx.ui?.notify).not.toHaveBeenCalled();
 	});
 });

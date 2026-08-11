@@ -9,7 +9,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
-import { loadConfig, readEnvConfig, resolveTurnLimits } from "../src/config.js";
+import { DEFAULTS, loadConfig, readEnvConfig, resolveTurnLimits } from "../src/config.js";
 
 let rootDir = "";
 let cwd = "";
@@ -191,5 +191,70 @@ describe("loadConfig", () => {
 			reflectorMaxTurnsPerPass: 3,
 			prunerMaxTurnsPerPass: 4,
 		});
+	});
+});
+
+describe("enabled (master switch)", () => {
+	it("defaults to true (additive — OM stays enabled by default)", () => {
+		expect(DEFAULTS.enabled).toBe(true);
+		expect(loadConfig(cwd, {}).enabled).toBe(true);
+	});
+
+	it("reads enabled from global and local settings with local precedence", () => {
+		writeJson(join(mock.agentDir, "settings.json"), {
+			"observational-memory": { enabled: false },
+		});
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { enabled: true },
+		});
+		expect(loadConfig(cwd, {}).enabled).toBe(true);
+
+		rmSync(join(cwd, ".pi", "settings.json"));
+		expect(loadConfig(cwd, {}).enabled).toBe(false);
+	});
+
+	it("ignores non-boolean enabled settings values (falls back to default true)", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { enabled: "false" },
+		});
+		expect(loadConfig(cwd, {}).enabled).toBe(true);
+	});
+});
+
+describe("readEnvConfig (enabled env gate)", () => {
+	it("parses enabled truthy and falsy env values", () => {
+		for (const value of ["1", "true", "yes", "on", " TRUE "]) {
+			expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_ENABLED: value })).toEqual({ enabled: true });
+		}
+		for (const value of ["0", "false", "no", "off", " OFF "]) {
+			expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_ENABLED: value })).toEqual({ enabled: false });
+		}
+	});
+
+	it("ignores unset or invalid enabled env values", () => {
+		expect(readEnvConfig({})).toEqual({});
+		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_ENABLED: "maybe" })).toEqual({});
+		expect(readEnvConfig({ PI_OBSERVATIONAL_MEMORY_ENABLED: "" })).toEqual({});
+	});
+
+	it("env enabled overrides settings.json in both directions", () => {
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { enabled: true },
+		});
+		expect(loadConfig(cwd, { PI_OBSERVATIONAL_MEMORY_ENABLED: "false" }).enabled).toBe(false);
+
+		writeJson(join(cwd, ".pi", "settings.json"), {
+			"observational-memory": { enabled: false },
+		});
+		expect(loadConfig(cwd, { PI_OBSERVATIONAL_MEMORY_ENABLED: "true" }).enabled).toBe(true);
+	});
+
+	it("returns both passive and enabled when both env vars are set", () => {
+		expect(
+			readEnvConfig({
+				PI_OBSERVATIONAL_MEMORY_PASSIVE: "1",
+				PI_OBSERVATIONAL_MEMORY_ENABLED: "0",
+			}),
+		).toEqual({ passive: true, enabled: false });
 	});
 });

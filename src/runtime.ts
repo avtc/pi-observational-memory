@@ -22,6 +22,7 @@ export interface LaunchCtx {
 export class Runtime {
 	config: Config = { ...DEFAULTS };
 	configLoaded = false;
+	private lastCwd?: string;
 	observerInFlight = false;
 	observerPromise: Promise<void> | null = null;
 	compactInFlight = false;
@@ -30,8 +31,25 @@ export class Runtime {
 
 	ensureConfig(cwd: string): void {
 		if (this.configLoaded) return;
+		this.lastCwd = cwd;
 		this.config = loadConfig(cwd);
 		this.configLoaded = true;
+	}
+
+	/** Clear the cached config + reload from settings.json/env. Lets a host
+	 *  (e.g. avtc-pi-bench-compact) reconfigure OM LIVE without ctx.reload(). */
+	reloadConfig(cwd: string): void {
+		this.configLoaded = false;
+		this.config = undefined as unknown as Config;
+		this.ensureConfig(cwd);
+	}
+
+	/** Read the current effective config. Ensures the config is loaded when a
+	 *  cwd is known (last ensureConfig/reloadConfig cwd); otherwise returns the
+	 *  DEFAULTS-populated field (always populated, never undefined). */
+	getConfig(): Config {
+		if (!this.configLoaded && this.lastCwd !== undefined) this.ensureConfig(this.lastCwd);
+		return this.config;
 	}
 
 	async resolveModel(ctx: ResolveCtx): Promise<ResolveResult> {
