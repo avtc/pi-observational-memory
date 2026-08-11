@@ -325,6 +325,15 @@ describe("compaction hook", () => {
 		expect(agentLoopMock).not.toHaveBeenCalled();
 		const notifyMessages = notify.mock.calls.map(([message]) => String(message));
 		expect(notifyMessages.some((message) => message.includes("no new observations") && message.includes("carrying forward"))).toBe(true);
+		// UD32: the carry-forward path STILL emits compaction.usage (all zeros — no stages ran).
+		// toMatchObject above ignores unlisted keys, so assert the shape explicitly (a regression
+		// dropping usage from this path would otherwise pass silently).
+		const carryUsage = (result as { compaction: { usage: { input: number; cacheWrite: number; totalTokens: number; cost: { total: number } } } }).compaction.usage;
+		expect(carryUsage).toBeDefined();
+		expect(carryUsage.input).toBe(0);
+		expect(carryUsage.cacheWrite).toBe(0);
+		expect(carryUsage.cost.total).toBe(0);
+		expect(Number.isFinite(carryUsage.totalTokens)).toBe(true);
 	});
 
 	// Builds a compaction-hook harness with a delta that triggers the reflector/pruner gate.
