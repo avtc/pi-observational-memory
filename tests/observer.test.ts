@@ -110,6 +110,60 @@ describe("runObserver", () => {
 	});
 });
 
+describe("runObserver model failures", () => {
+	// A realistic agent-loop stream that ends in a terminal model/runtime failure.
+	// Per the StreamFn contract, failures are encoded as a final assistant message
+	// with stopReason "error"/"aborted" — NOT a thrown error.
+	function errorAgentLoop(errorMessage: string, stopReason: "error" | "aborted" = "error"): any {
+		return (() => ({
+			async *[Symbol.asyncIterator]() {
+				const failed = { role: "assistant", stopReason, errorMessage, content: [] };
+				yield { type: "message_start", message: failed };
+				yield { type: "message_end", message: failed };
+				yield { type: "turn_end", message: failed, toolResults: [] };
+				yield { type: "agent_end", messages: [failed] };
+			},
+			result: async () => ({}),
+		})) as any;
+	}
+
+	const baseArgs = {
+		model: {} as any,
+		apiKey: "test",
+		priorReflections: [],
+		priorObservations: [],
+		chunk: "[Source entry id: entry-a]\nUser asked for a memory update.",
+		allowedSourceEntryIds: ["entry-a"],
+	};
+
+	it("throws when the model ends with stopReason error (server unavailable)", async () => {
+		await expect(
+			runObserver({ ...baseArgs, agentLoop: errorAgentLoop("connect ECONNREFUSED 127.0.0.1:11434") }),
+		).rejects.toThrow(/connect ECONNREFUSED/);
+	});
+
+	it("throws when the model ends with stopReason aborted", async () => {
+		await expect(
+			runObserver({ ...baseArgs, agentLoop: errorAgentLoop("aborted by signal", "aborted") }),
+		).rejects.toThrow(/stopReason "aborted"/);
+	});
+
+	it("does not throw when the model succeeds with a normal stop reason", async () => {
+		const okLoop = (() => ({
+			async *[Symbol.asyncIterator]() {
+				yield { type: "message_end", message: { role: "assistant", stopReason: "end_turn", content: [] } };
+				yield { type: "agent_end", messages: [] };
+			},
+			result: async () => ({}),
+		})) as any;
+
+		// Model produced a text reply but never called record_observations —
+		// legitimate empty, not a failure.
+		await expect(runObserver({ ...baseArgs, agentLoop: okLoop })).resolves.toBeUndefined();
+	});
+});
+
+
 describe("normalizeSourceEntryIds", () => {
 	const allowed = ["entry-a", "entry-b", "entry-c"];
 

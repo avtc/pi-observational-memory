@@ -1,7 +1,9 @@
-import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@mariozechner/pi-agent-core";
-import type { Message, Model, ModelThinkingLevel } from "@mariozechner/pi-ai";
-import { Type } from "@mariozechner/pi-ai";
+import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { Type } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
+import { drainAgentStream } from "./agent-stream.js";
 import { hashId } from "./ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "./model-budget.js";
 import { OBSERVER_SYSTEM } from "./prompts.js";
@@ -184,11 +186,14 @@ ${conversation}`;
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal);
-	for await (const _event of stream) {
-		// Drain events; the tool's execute already collects records.
-	}
-	await stream.result();
+	const stream = loop(prompts, context, config, signal, streamSimple);
+	// Drain events (the tool's execute already collects records) and surface any
+	// terminal model/runtime failure. Per the StreamFn contract, model failures
+	// (dead server, wrong model, provider error) do NOT throw from the stream —
+	// they are encoded as a final assistant message with stopReason "error"/
+	// "aborted". drainAgentStream translates that into a thrown AgentStreamError so
+	// callers cancel compaction instead of silently treating it as an empty run.
+	await drainAgentStream(stream);
 
 	if (accumulated.size === 0) return undefined;
 	return Array.from(accumulated.values());

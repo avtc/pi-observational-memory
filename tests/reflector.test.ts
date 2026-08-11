@@ -309,6 +309,31 @@ describe("runReflector multi-pass orchestration", () => {
 		]);
 	});
 
+	it("marks a pass failed when the model ends with stopReason error (server unavailable)", async () => {
+		// Per the StreamFn contract, a model failure is encoded as a final assistant
+		// message with stopReason "error" — it does NOT throw from the stream. Without
+		// stopReason inspection this would look like a successful empty pass and the
+		// reflector guard (failedPass) would never fire.
+		const errorLoop = (() => ({
+			async *[Symbol.asyncIterator]() {
+				const failed = { role: "assistant", stopReason: "error", errorMessage: "model 'qwen2.5' not found", content: [] };
+				yield { type: "message_start", message: failed };
+				yield { type: "message_end", message: failed };
+				yield { type: "turn_end", message: failed, toolResults: [] };
+				yield { type: "agent_end", messages: [failed] };
+			},
+			result: async () => ({}),
+		})) as any;
+
+		const result = await runReflector({ model: {} as any, apiKey: "test", agentLoop: errorLoop }, [], observations);
+
+		expect(result.stats.failedPass).toBe(1);
+		expect(result.stats.passes).toMatchObject([{ pass: 1, failed: true }]);
+		// Nothing accepted on the failed pass.
+		expect(result.reflections).toEqual([]);
+		expect(result.stats.accepted).toBe(0);
+	});
+
 	it("calls onEvent callback with agent events during reflector passes", async () => {
 		const events: string[] = [];
 		const loop = fakeAgentLoop(async (_prompts, context) => {

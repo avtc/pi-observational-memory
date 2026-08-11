@@ -14,11 +14,11 @@ import { describe, expect, it, vi } from "vitest";
 const agentLoopMock = vi.hoisted(() => vi.fn());
 const codingAgentMock = vi.hoisted(() => ({ agentDir: "" }));
 
-vi.mock("@mariozechner/pi-agent-core", () => ({
+vi.mock("@earendil-works/pi-agent-core", () => ({
 	agentLoop: agentLoopMock,
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => codingAgentMock.agentDir,
 	estimateTokens: (msg: any) => {
 		if (typeof msg?.content === "string") return Math.ceil(msg.content.length / 4);
@@ -268,6 +268,97 @@ describe("gap detection after compaction", () => {
 
 		// Verify compaction succeeded
 		expect(result).toHaveProperty("compaction");
+	});
+
+	it("cancels compaction when the sync catch-up model errors (server unavailable)", async () => {
+		// Regression: when the compaction model/server is unavailable (or the wrong
+		// model is hosted), the StreamFn contract encodes the failure as a final
+		// assistant message with stopReason "error" — NOT a thrown error. Previously
+		// runObserver drained the stream without inspecting stopReason, returned
+		// undefined, and the catch-up reported success; since the delta was empty but
+		// prior memory existed, compaction CARRIED FORWARD and PASSED — silently
+		// dropping every unobserved gap entry. It must CANCEL instead.
+		function errorAgentStream(errorMessage = "model server unreachable") {
+			return {
+				async *[Symbol.asyncIterator]() {
+					const failed = { role: "assistant", stopReason: "error", errorMessage, content: [] };
+					yield { type: "message_start", message: failed };
+					yield { type: "message_end", message: failed };
+					yield { type: "turn_end", message: failed, toolResults: [] };
+					yield { type: "agent_end", messages: [failed] };
+				},
+				result: async () => ({}),
+			};
+		}
+
+		agentLoopMock.mockReset();
+		agentLoopMock.mockImplementation(() => errorAgentStream());
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			resolveFailureNotified: false,
+			config: {
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 30_000,
+				passive: true,
+				debugLog: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		// Prior memory exists (compaction entry carries an observation) AND there is a
+		// live gap to observe — exactly the silent-pass scenario.
+		const entries = [
+			compactionEntry({
+				id: "prior-compaction",
+				firstKeptEntryId: "raw-0",
+				details: {
+					type: "observational-memory",
+					version: 4,
+					observations: [observation],
+					reflections: [],
+				},
+			}),
+			...Array.from({ length: 5 }, (_, i) =>
+				messageEntry({ id: `raw-${i}`, message: { role: "user", content: `Message ${i} content` } }),
+			),
+			messageEntry({ id: "new-boundary", message: { role: "user", content: "boundary" } }),
+			messageEntry({ id: "tail", message: { role: "user", content: "kept tail" } }),
+		];
+
+		const notify = vi.fn();
+		const result = await handler({
+			preparation: { firstKeptEntryId: "new-boundary", tokensBefore: 50000 },
+			branchEntries: entries,
+			signal: undefined,
+		}, {
+			cwd: "/tmp/project",
+			hasUI: true,
+			ui: { notify, setWidget: vi.fn() },
+			sessionManager: { getBranch: vi.fn(() => entries) },
+		});
+
+		// MUST cancel — not carry forward / pass — so the unobserved gap is preserved.
+		expect(result).toEqual({ cancel: true });
+		expect(result).not.toHaveProperty("compaction");
+
+		// The user is told why and what to do.
+		const messages = notify.mock.calls.map((call) => String(call[0]));
+		expect(messages.some((m) => /sync catch-up observer failed/i.test(m))).toBe(true);
+		expect(messages.some((m) => /Cancelling compaction/i.test(m))).toBe(true);
 	});
 
 	it("rawTokensSinceLastBound clamps to compaction entry when observation coversUpToId is dangling", () => {

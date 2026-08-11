@@ -236,6 +236,34 @@ describe("coverage-aware pruner prompts", () => {
 		]);
 	});
 
+	it("falls back when the model ends with stopReason error (server unavailable)", async () => {
+		// Per the StreamFn contract, a model failure is encoded as a final assistant
+		// message with stopReason "error" — it does NOT throw from the stream.
+		// Without stopReason inspection this would look like a successful no-drop
+		// pass and the pruner guard (fellBack) would never fire.
+		const errorLoop = (() => ({
+			async *[Symbol.asyncIterator]() {
+				const failed = { role: "assistant", stopReason: "error", errorMessage: "connect ECONNREFUSED", content: [] };
+				yield { type: "message_start", message: failed };
+				yield { type: "message_end", message: failed };
+				yield { type: "turn_end", message: failed, toolResults: [] };
+				yield { type: "agent_end", messages: [failed] };
+			},
+			result: async () => ({}),
+		})) as any;
+		const reflections: MemoryReflection[] = [reflection("A cited.", [obsA.id])];
+		// Pool above target so a pass actually runs.
+		const targetBudget = 1;
+
+		const result = await runPruner({ model: {} as any, apiKey: "test", agentLoop: errorLoop }, reflections, observations, targetBudget);
+
+		expect(result.fellBack).toBe(true);
+		expect(result.stopReason).toBe("fell_back");
+		// Nothing dropped on the failed pass — pool returned unchanged.
+		expect(result.droppedIds).toEqual([]);
+		expect(result.observations).toEqual(observations);
+	});
+
 	it("does not add coverage tags to reflector prompts", async () => {
 		const loop = fakeAgentLoop((prompts) => {
 			const text = promptText(prompts);

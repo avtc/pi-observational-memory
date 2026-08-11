@@ -1,6 +1,8 @@
-import { agentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type AgentTool } from "@mariozechner/pi-agent-core";
-import { Type, type Message, type Model, type ModelThinkingLevel } from "@mariozechner/pi-ai";
+import { agentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import { Type, type Message, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
+import { drainAgentStream } from "./agent-stream.js";
 import { debugLog, isDebugLogEnabled } from "./debug-log.js";
 import { hashId } from "./ids.js";
 import { AGENT_LOOP_MAX_TOKENS, boundedMaxTokens } from "./model-budget.js";
@@ -25,7 +27,7 @@ interface LlmArgs {
 	headers?: Record<string, string>;
 	signal?: AbortSignal;
 	agentLoop?: typeof agentLoop;
-	onEvent?: (event: import("@mariozechner/pi-agent-core").AgentEvent) => void;
+	onEvent?: (event: import("@earendil-works/pi-agent-core").AgentEvent) => void;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
 }
@@ -636,17 +638,19 @@ Crystallize long-lived reflections from the full observation pool for this pass.
 	try {
 		debugLog("reflector.agent_loop.before_call", { pass: passContext.pass });
 		const loop = args.agentLoop ?? agentLoop;
-		const stream = loop(prompts, context, config, args.signal);
+		const stream = loop(prompts, context, config, args.signal, streamSimple);
 		debugLog("reflector.agent_loop.stream_created", { pass: passContext.pass });
-		for await (const event of stream) {
+		// drainAgentStream throws AgentStreamError on a terminal model/runtime
+		// failure (stopReason error/aborted) — caught below and mapped to
+		// stats.failed so the compaction hook cancels instead of passing.
+		await drainAgentStream(stream, (event) => {
 			if (!firstEventSeen) {
 				firstEventSeen = true;
 				debugLog("reflector.agent_loop.first_event", { pass: passContext.pass, type: event.type });
 			}
 			logAgentLoopEvent("reflector", passContext.pass, event);
 			args.onEvent?.(event);
-		}
-		await stream.result();
+		});
 		debugLog("reflector.pass.result", { pass: passContext.pass, stats, reflectionCount: currentReflections.length });
 	} catch (error) {
 		stats.failed = true;
@@ -887,18 +891,20 @@ Decide which observations to remove from the kept set. Call drop_observations wi
 		debugLog("pruner.agent_loop.before_call", { pass: passContext.pass });
 		const loop = args.agentLoop ?? agentLoop;
 		agentLoopCalled = true;
-		const stream = loop(prompts, context, config, args.signal);
+		const stream = loop(prompts, context, config, args.signal, streamSimple);
 		streamCreated = true;
 		debugLog("pruner.agent_loop.stream_created", { pass: passContext.pass });
-		for await (const event of stream) {
+		// drainAgentStream throws AgentStreamError on a terminal model/runtime
+		// failure (stopReason error/aborted) — caught below and mapped to
+		// fellBack so the compaction hook cancels instead of passing.
+		await drainAgentStream(stream, (event) => {
 			if (!firstEventSeen) {
 				firstEventSeen = true;
 				debugLog("pruner.agent_loop.first_event", { pass: passContext.pass, type: event.type });
 			}
 			logAgentLoopEvent("pruner", passContext.pass, event);
 			args.onEvent?.(event);
-		}
-		await stream.result();
+		});
 	} catch (error) {
 		debugLog("pruner.agent_loop.error", {
 			pass: passContext.pass,

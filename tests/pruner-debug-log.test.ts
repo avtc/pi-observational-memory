@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mock = vi.hoisted(() => ({ agentDir: "" }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
 	getAgentDir: () => mock.agentDir,
 }));
 
@@ -109,9 +109,11 @@ describe("pruner debug logging", () => {
 			runPruner({ model: {} as any, apiKey: "test", agentLoop: loop }, [], [observation], 1),
 		);
 
-		expect(result.stopReason).toBe("zero_drops");
-		expect(result.fellBack).toBe(false);
+		expect(result.stopReason).toBe("fell_back");
+		expect(result.fellBack).toBe(true);
 		const events = readEvents();
+		// The message_end summary is still logged (with raw content redacted) before
+		// drainAgentStream translates the stopReason "error" into a thrown failure.
 		const messageEnd = events.find((event) => event.event === "pruner.agent_loop.message_end");
 		expect(messageEnd).toMatchObject({
 			data: {
