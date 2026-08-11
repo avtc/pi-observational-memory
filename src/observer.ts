@@ -1,7 +1,6 @@
-import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { drainAgentStream } from "./agent-stream.js";
 import { hashId } from "./ids.js";
@@ -186,7 +185,12 @@ ${conversation}`;
 	};
 
 	const loop = args.agentLoop ?? agentLoop;
-	const stream = loop(prompts, context, config, signal, streamSimple);
+	// pi 0.84.1 made `streamFn` a required agentLoop arg. Pass `undefined` (cast to
+	// the required type) so pi-agent-core falls back to its process-global default
+	// streamFn, which pi-coding-agent installs at startup — that default dispatches
+	// through the coding-agent model runtime, preserving resolved auth and custom
+	// providers. (A bare streamSimple would bypass that runtime.)
+	const stream = loop(prompts, context, config, signal, undefined as unknown as StreamFn);
 	// Drain events (the tool's execute already collects records) and surface any
 	// terminal model/runtime failure. Per the StreamFn contract, model failures
 	// (dead server, wrong model, provider error) do NOT throw from the stream —

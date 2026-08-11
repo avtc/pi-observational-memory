@@ -1,6 +1,5 @@
-import { agentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type AgentTool } from "@earendil-works/pi-agent-core";
+import { agentLoop, type AgentContext, type AgentEvent, type AgentLoopConfig, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import { Type, type Message, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { streamSimple } from "@earendil-works/pi-ai/compat";
 import type { Static } from "typebox";
 import { drainAgentStream } from "./agent-stream.js";
 import { debugLog, isDebugLogEnabled } from "./debug-log.js";
@@ -638,7 +637,11 @@ Crystallize long-lived reflections from the full observation pool for this pass.
 	try {
 		debugLog("reflector.agent_loop.before_call", { pass: passContext.pass });
 		const loop = args.agentLoop ?? agentLoop;
-		const stream = loop(prompts, context, config, args.signal, streamSimple);
+		// pi 0.84.1 made `streamFn` a required agentLoop arg. Pass `undefined` (cast
+		// to the required type) so pi-agent-core falls back to its process-global
+		// default streamFn (installed by pi-coding-agent at startup) — preserves
+		// resolved auth and custom providers instead of bypassing them with streamSimple.
+		const stream = loop(prompts, context, config, args.signal, undefined as unknown as StreamFn);
 		debugLog("reflector.agent_loop.stream_created", { pass: passContext.pass });
 		// drainAgentStream throws AgentStreamError on a terminal model/runtime
 		// failure (stopReason error/aborted) — caught below and mapped to
@@ -891,7 +894,7 @@ Decide which observations to remove from the kept set. Call drop_observations wi
 		debugLog("pruner.agent_loop.before_call", { pass: passContext.pass });
 		const loop = args.agentLoop ?? agentLoop;
 		agentLoopCalled = true;
-		const stream = loop(prompts, context, config, args.signal, streamSimple);
+		const stream = loop(prompts, context, config, args.signal, undefined as unknown as StreamFn);
 		streamCreated = true;
 		debugLog("pruner.agent_loop.stream_created", { pass: passContext.pass });
 		// drainAgentStream throws AgentStreamError on a terminal model/runtime
