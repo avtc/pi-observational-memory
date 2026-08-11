@@ -437,6 +437,86 @@ describe("compaction hook", () => {
 		expect((result as any).compaction).toBeUndefined();
 		expect(pi.appendEntry).not.toHaveBeenCalled();
 	});
+
+	it("returns compaction.usage (pi shape) aggregating observer/reflector/pruner cost + per-stage breakdown in details", async () => {
+		agentLoopMock.mockReset();
+		// a fake stream that emits a message_end carrying usage on every stage call
+		const usageAgentStream = () => ({
+			async *[Symbol.asyncIterator]() {
+				const msg = { role: "assistant", content: [], stopReason: "stop", usage: { input: 100, output: 50, cacheRead: 5, cacheWrite: 8, totalTokens: 163, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } } };
+				yield { type: "message_start", message: msg };
+				yield { type: "message_end", message: msg };
+				yield { type: "turn_end", message: msg, toolResults: [] };
+				yield { type: "agent_end", messages: [msg] };
+			},
+			result: async () => ({}),
+		});
+		agentLoopMock.mockImplementation(() => usageAgentStream());
+
+		let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+		const pi = {
+			on: vi.fn((eventName: string, cb: typeof handler) => {
+				expect(eventName).toBe("session_before_compact");
+				handler = cb;
+			}),
+			appendEntry: vi.fn(),
+		};
+		const debugRoot = join(tmpdir(), `om-compaction-usage-test-${process.pid}-${Date.now()}`);
+		codingAgentMock.agentDir = join(debugRoot, "agent");
+		mkdirSync(codingAgentMock.agentDir, { recursive: true });
+
+		const runtime = {
+			compactHookInFlight: false,
+			observerPromise: null,
+			resolveFailureNotified: false,
+			config: {
+				observationThresholdTokens: 1,
+				compactionThresholdTokens: 50_000,
+				reflectionThresholdTokens: 1, // force reflector/pruner to run
+				passive: false,
+				debugLog: false,
+			},
+			ensureConfig: vi.fn(),
+			resolveModel: vi.fn(async () => ({ ok: true, model: {}, apiKey: "test-key" })),
+		};
+		registerCompactionHook(pi as never, runtime as never);
+		if (!handler) throw new Error("session_before_compact handler was not registered");
+
+		const obs: ObservationRecord = {
+			id: "111111111111",
+			timestamp: "2026-05-02 10:30",
+			relevance: "medium",
+			content: "an observed fact",
+			sourceEntryIds: ["source-entry"],
+		};
+		const entries = [
+			messageEntry({ id: "source-entry", message: { role: "user", content: "source" } }),
+			observationEntry({ id: "observation-entry", data: { records: [obs], coversFromId: "source-entry", coversUpToId: "source-entry", tokenCount: 10 } }),
+			messageEntry({ id: "kept-entry", message: { role: "user", content: "kept tail" } }),
+		];
+		const result = (await handler({
+			preparation: { firstKeptEntryId: "kept-entry", tokensBefore: 123 },
+			branchEntries: entries,
+			signal: undefined,
+		}, {
+			cwd: debugRoot,
+			hasUI: false,
+			ui: { notify: vi.fn(), setWidget: vi.fn() },
+			sessionManager: { getBranch: vi.fn(() => entries) },
+		})) as { compaction?: { usage?: Record<string, unknown>; details?: { compactionStages?: Record<string, unknown> } } };
+
+		const usage = result.compaction?.usage;
+		expect(usage).toBeDefined();
+		// all token fields are finite numbers (NEVER undefined — addUsageToTotals has no guards)
+		expect(Number.isFinite(usage?.input)).toBe(true);
+		expect(Number.isFinite(usage?.cacheWrite)).toBe(true);
+		expect(Number.isFinite(usage?.totalTokens)).toBe(true);
+		// cost is an object with a finite total
+		expect(typeof usage?.cost).toBe("object");
+		expect(Number.isFinite(usage?.cost?.total)).toBe(true);
+		// per-stage breakdown present in details
+		expect(result.compaction?.details?.compactionStages).toBeDefined();
+	});
 });
 
 describe("renderSummary", () => {

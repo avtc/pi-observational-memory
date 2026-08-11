@@ -1,3 +1,5 @@
+import type { Usage } from "@earendil-works/pi-ai";
+
 export const OBSERVATION_CUSTOM_TYPE = "om.observation";
 
 export type Relevance = "low" | "medium" | "high" | "critical";
@@ -43,6 +45,10 @@ export interface MemoryDetailsV4 {
 	version: 4;
 	observations: ObservationRecord[];
 	reflections: MemoryReflection[];
+	/** Per-stage pi-Usage breakdown for this compaction's observer/reflector/pruner
+	 *  cost (additive — the bench reads it for the per-compaction cost table).
+	 *  Absent on older snapshots (isMemoryDetailsV4 does not require it). */
+	compactionStages?: { observer: Usage; reflector: Usage; pruner: Usage };
 }
 
 export type SupportedMemoryDetails = MemoryDetailsV3 | MemoryDetailsV4;

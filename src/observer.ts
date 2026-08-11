@@ -1,4 +1,11 @@
-import { agentLoop, type AgentContext, type AgentLoopConfig, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
+import {
+	agentLoop,
+	type AgentContext,
+	type AgentEvent,
+	type AgentLoopConfig,
+	type AgentTool,
+	type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import type { Message, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Static } from "typebox";
@@ -21,6 +28,10 @@ interface RunObserverArgs {
 	agentLoop?: typeof agentLoop;
 	maxTurns?: number;
 	thinkingLevel?: ModelThinkingLevel;
+	/** Event sink mirroring reflector/pruner — the hook passes a usage-collecting
+	 *  callback so the catch-up observer's message_end.usage is captured (it was
+	 *  previously discarded: drainAgentStream got no callback). */
+	onEvent?: (event: AgentEvent) => void;
 }
 
 const RelevanceSchema = Type.Union([
@@ -197,7 +208,7 @@ ${conversation}`;
 	// they are encoded as a final assistant message with stopReason "error"/
 	// "aborted". drainAgentStream translates that into a thrown AgentStreamError so
 	// callers cancel compaction instead of silently treating it as an empty run.
-	await drainAgentStream(stream);
+	await drainAgentStream(stream, args.onEvent);
 
 	if (accumulated.size === 0) return undefined;
 	return Array.from(accumulated.values());

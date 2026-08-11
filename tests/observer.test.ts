@@ -188,3 +188,33 @@ describe("normalizeSourceEntryIds", () => {
 		expect(normalizeSourceEntryIds(["entry-a"], [])).toBeUndefined();
 	});
 });
+
+describe("runObserver onEvent", () => {
+	it("forwards the agent event stream to onEvent (so usage on message_end is capturable)", async () => {
+		const events: string[] = [];
+		// a fake loop that emits a message_end carrying usage (the catch-up observer
+		// previously discarded the stream — drainAgentStream got no callback).
+		const loop = (() => ({
+			async *[Symbol.asyncIterator]() {
+				const msg = { role: "assistant", content: [], stopReason: "stop", usage: { input: 100, output: 50, cacheRead: 5, cacheWrite: 8, totalTokens: 163, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } } };
+				yield { type: "message_start", message: msg };
+				yield { type: "message_end", message: msg };
+				yield { type: "turn_end", message: msg, toolResults: [] };
+				yield { type: "agent_end", messages: [msg] };
+			},
+			result: async () => ({}),
+		})) as any;
+		await runObserver({
+			model: {} as any,
+			apiKey: "test",
+			priorReflections: [],
+			priorObservations: [],
+			chunk: "[Source entry id: entry-a]\nUser asked for a memory update.",
+			allowedSourceEntryIds: ["entry-a"],
+			agentLoop: loop,
+			onEvent: (event) => events.push(event.type),
+		});
+		expect(events).toContain("message_end");
+		expect(events).toContain("message_start");
+	});
+});

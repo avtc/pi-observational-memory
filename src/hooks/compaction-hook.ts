@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { debugLog, withDebugLogContext } from "../debug-log.js";
 import { resolveTurnLimits } from "../config.js";
+import { createUsageAccumulator, sumUsages } from "../usage-accumulator.js";
 import {
 	collectObservationsByCoverage,
 	findLastCompactionIndex,
@@ -156,6 +157,11 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			const hasUI = ctx.hasUI;
 			const ui = ctx.ui;
 			const turnLimits = resolveTurnLimits(runtime.config);
+			// Per-stage usage accumulators (catch-up Observer + reflector + pruner). Wired to
+			// each stage onEvent so compaction.usage reflects this compaction LLM cost.
+			const observerUsage = createUsageAccumulator();
+			const reflectorUsage = createUsageAccumulator();
+			const prunerUsage = createUsageAccumulator();
 			debugLog("compaction.start", {
 				firstKeptEntryId,
 				tokensBefore,
@@ -292,6 +298,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 								signal,
 								maxTurns: turnLimits.observerMaxTurnsPerRun,
 								thinkingLevel: runtime.config.thinkingLevel,
+								onEvent: (event) => observerUsage.onEvent(event),
 							});
 
 							if (records && records.length > 0) {
@@ -374,11 +381,17 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					reflections: workingReflections.length,
 				});
 				const summary = renderSummary(workingReflections, memoryState.committedObs);
+				const compactionUsage = sumUsages([observerUsage.toUsage(), reflectorUsage.toUsage(), prunerUsage.toUsage()]);
 				const details: MemoryDetailsV4 = {
 					type: "observational-memory",
 					version: 4,
 					observations: memoryState.committedObs,
 					reflections: workingReflections,
+					compactionStages: {
+						observer: observerUsage.toUsage(),
+						reflector: reflectorUsage.toUsage(),
+						pruner: prunerUsage.toUsage(),
+					},
 				};
 				if (hasUI) ui?.notify(
 					`Observational memory: no new observations — carrying forward ${memoryState.committedObs.length} observation${memoryState.committedObs.length === 1 ? "" : "s"}, ${workingReflections.length} reflection${workingReflections.length === 1 ? "" : "s"}`,
@@ -389,6 +402,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						summary,
 						firstKeptEntryId,
 						tokensBefore,
+						usage: compactionUsage,
 						details,
 					},
 				};
@@ -425,7 +439,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					updateWidget();
 					const coverageBefore = coverageTagCounts(workingReflections, workingObservations);
 					const reflectorResult = await runReflector(
-						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); reflectorUsage.onEvent(event); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 						workingReflections,
 						workingObservations,
 						(pass, max) => { progress.setPhase("reflector", pass, max); updateWidget(); },
@@ -455,7 +469,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					}
 
 					const prunerResult = await runPruner(
-						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); prunerUsage.onEvent(event); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 						finalReflections,
 						workingObservations,
 						runtime.config.reflectionThresholdTokens,
@@ -506,11 +520,17 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				throw new Error("invariant violated: finalObservations empty after delta guard");
 			}
 
+			const compactionUsage = sumUsages([observerUsage.toUsage(), reflectorUsage.toUsage(), prunerUsage.toUsage()]);
 			const details: MemoryDetailsV4 = {
 				type: "observational-memory",
 				version: 4,
 				observations: finalObservations,
 				reflections: finalReflections,
+				compactionStages: {
+					observer: observerUsage.toUsage(),
+					reflector: reflectorUsage.toUsage(),
+					pruner: prunerUsage.toUsage(),
+				},
 			};
 			debugLog("compaction.result", {
 				finalObservations: finalObservations.length,
@@ -529,6 +549,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					summary,
 					firstKeptEntryId,
 					tokensBefore,
+					usage: compactionUsage,
 					details,
 				},
 			};
