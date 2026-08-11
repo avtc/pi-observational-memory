@@ -509,6 +509,9 @@ describe("compaction hook", () => {
 		expect(usage).toBeDefined();
 		// all token fields are finite numbers (NEVER undefined — addUsageToTotals has no guards)
 		expect(Number.isFinite(usage?.input)).toBe(true);
+		// the aggregate is non-zero — the fake stream emits real usage on each stage call,
+		// so an all-zero regression (stages not wired to accumulators) would fail here.
+		expect(usage?.input).toBeGreaterThan(0);
 		expect(Number.isFinite(usage?.cacheWrite)).toBe(true);
 		expect(Number.isFinite(usage?.totalTokens)).toBe(true);
 		// cost is an object with a finite total
