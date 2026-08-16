@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
 import { CompactionProgressTracker } from "../src/progress.js";
+import { formatTokens } from "../src/tokens.js";
+
+describe("formatTokens", () => {
+	it("formats plain numbers below 1k", () => {
+		expect(formatTokens(0)).toBe("0");
+		expect(formatTokens(999)).toBe("999");
+	});
+
+	it("formats k with one decimal below 10k and rounded above", () => {
+		expect(formatTokens(1000)).toBe("1.0k");
+		expect(formatTokens(9500)).toBe("9.5k");
+		expect(formatTokens(15_000)).toBe("15k");
+		expect(formatTokens(999_999)).toBe("1000k");
+	});
+
+	it("formats M with one decimal below 10M and rounded above", () => {
+		expect(formatTokens(1_500_000)).toBe("1.5M");
+		expect(formatTokens(15_000_000)).toBe("15M");
+	});
+});
 
 describe("CompactionProgressTracker", () => {
 	it("starts in idle state with no phase", () => {
@@ -400,5 +420,163 @@ describe("CompactionProgressTracker", () => {
 		});
 		const text = tracker.formatWidget({ fg: (_c: string, t: string) => t });
 		expect(text).not.toContain("R 15(+5)");
+	});
+});
+
+describe("CompactionProgressTracker ctx + streaming tokens", () => {
+	const theme = { fg: (_c: string, t: string) => t };
+
+	function textDelta(delta: string, usage?: { output?: number }) {
+		return {
+			type: "message_update",
+			message: usage ? ({ usage } as any) : ({} as any),
+			assistantMessageEvent: { type: "text_delta", delta },
+		} as any;
+	}
+
+	function messageEnd(usage: { totalTokens?: number; output?: number; input?: number }) {
+		return { type: "message_end", message: { role: "assistant", usage } } as any;
+	}
+
+	it("shows '?/window · 0 tok' when a phase is active but nothing streamed yet", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(200_000);
+		tracker.setPhase("reflector", 1, 3);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("?/200k");
+		expect(text).toContain("0 tok");
+	});
+
+	it("shows ctx usage without a denominator when the window is unknown", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("observer", 1, 1);
+		tracker.onEvent(messageEnd({ totalTokens: 12_345 }));
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("12k · ");
+		expect(text).not.toContain("?/");
+	});
+
+	it("tracks per-agent ctx usage from message_end usage.totalTokens", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(200_000);
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent(messageEnd({ totalTokens: 45_000 }));
+		expect(tracker.getContextTokens()).toBe(45_000);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("45k/200k");
+	});
+
+	it("accumulates streamed text deltas as the fallback token tier (chars/4)", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("observer", 1, 2);
+		tracker.onEvent(textDelta("a".repeat(200)));
+		tracker.onEvent(textDelta("b".repeat(200)));
+		expect(tracker.getStreamingOutputTokens()).toBe(100);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("100 tok");
+	});
+
+	it("uses provider-streamed usage.output as the primary tier when larger", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("pruner", 1, 5);
+		tracker.onEvent(textDelta("x".repeat(40))); // fallback: 10
+		tracker.onEvent(textDelta("y".repeat(40), { output: 500 })); // primary: 500
+		expect(tracker.getStreamingOutputTokens()).toBe(500);
+	});
+
+	it("keeps whichever tier is further along (max, not primary-wins)", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("pruner", 1, 5);
+		tracker.onEvent(textDelta("z".repeat(400), { output: 50 })); // primary 50, fallback 100
+		expect(tracker.getStreamingOutputTokens()).toBe(100);
+		tracker.onEvent(textDelta("w".repeat(400), { output: 30 })); // primary never moves back
+		expect(tracker.getStreamingOutputTokens()).toBe(200);
+	});
+
+	it("counts thinking/toolcall deltas in the fallback tier", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent({
+			type: "message_update",
+			message: {} as any,
+			assistantMessageEvent: { type: "thinking_delta", delta: "t".repeat(80) },
+		} as any);
+		tracker.onEvent({
+			type: "message_update",
+			message: {} as any,
+			assistantMessageEvent: { type: "toolcall_delta", delta: "c".repeat(120) },
+		} as any);
+		expect(tracker.getStreamingOutputTokens()).toBe(50);
+	});
+
+	it("resets the streaming counter per message_start (per generation)", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("observer", 1, 2);
+		tracker.onEvent(textDelta("a".repeat(400)));
+		expect(tracker.getStreamingOutputTokens()).toBe(100);
+		tracker.onEvent({ type: "message_start", message: {} as any } as any);
+		expect(tracker.getStreamingOutputTokens()).toBe(0);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("0 tok");
+	});
+
+	it("preserves ctx usage across passes within a phase", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(100_000);
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent(messageEnd({ totalTokens: 30_000 }));
+		tracker.setPhase("reflector", 2, 3);
+		expect(tracker.getContextTokens()).toBe(30_000);
+	});
+
+	it("resets ctx usage and streaming when the phase changes", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(100_000);
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent(messageEnd({ totalTokens: 30_000 }));
+		tracker.onEvent(textDelta("a".repeat(400)));
+		tracker.setPhase("pruner", 1, 5);
+		expect(tracker.getContextTokens()).toBeNull();
+		expect(tracker.getStreamingOutputTokens()).toBe(0);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("?/100k");
+		expect(text).toContain("0 tok");
+	});
+
+	it("keeps the context window across phase changes", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(128_000);
+		tracker.setPhase("observer", 1, 1);
+		tracker.setPhase("reflector", 1, 3);
+		const text = tracker.formatWidget(theme);
+		expect(text).toContain("?/128k");
+	});
+
+	it("clear() resets ctx + streaming state", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(100_000);
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent(messageEnd({ totalTokens: 30_000 }));
+		tracker.onEvent(textDelta("a".repeat(400)));
+		tracker.clear();
+		expect(tracker.getContextTokens()).toBeNull();
+		expect(tracker.getContextWindow()).toBeNull();
+		expect(tracker.getStreamingOutputTokens()).toBe(0);
+	});
+
+	it("ignores events when no phase is set", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setContextWindow(100_000);
+		tracker.onEvent(messageEnd({ totalTokens: 30_000 }));
+		tracker.onEvent(textDelta("a".repeat(400)));
+		expect(tracker.getContextTokens()).toBeNull();
+		expect(tracker.getStreamingOutputTokens()).toBe(0);
+	});
+
+	it("ignores message_end without usage", () => {
+		const tracker = new CompactionProgressTracker();
+		tracker.setPhase("reflector", 1, 3);
+		tracker.onEvent({ type: "message_end", message: { role: "user" } } as any);
+		expect(tracker.getContextTokens()).toBeNull();
 	});
 });

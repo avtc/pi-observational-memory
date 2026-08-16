@@ -185,6 +185,10 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 			}
 			runtime.resolveFailureNotified = false;
 
+			// The compaction model's context window — the denominator of the widget's
+			// trailing ctx-usage cluster ({used}/{window} · {tok} tok).
+			progress.setContextWindow((resolved.model as { contextWindow?: number }).contextWindow ?? null);
+
 			const updateWidget = () => {
 				if (!hasUI || !ui) return;
 				if (!progress.getPhase()) {
@@ -197,6 +201,37 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 						0, 0,
 					);
 				});
+			};
+			// Throttled render for the per-event hot path: a fast stream emits many
+			// message_update events, but the widget only needs a fresh line every so
+			// often — and rendering every chunk (microtask) can saturate pi's event
+			// loop on a runaway generation, freezing the UI (Ctrl+C unresponsive).
+			// Leading-and-trailing throttle: the first event renders immediately, a
+			// burst coalesces into one trailing render at the interval boundary.
+			const RENDER_INTERVAL_MS = 200;
+			let lastRenderMs = 0;
+			let trailingTimer: ReturnType<typeof setTimeout> | null = null;
+			const scheduleWidgetUpdate = (): void => {
+				const now = Date.now();
+				const elapsed = now - lastRenderMs;
+				if (trailingTimer === null && elapsed >= RENDER_INTERVAL_MS) {
+					lastRenderMs = now;
+					updateWidget();
+					return;
+				}
+				if (trailingTimer !== null) return; // a trailing render is already pending
+				trailingTimer = setTimeout(() => {
+					trailingTimer = null;
+					lastRenderMs = Date.now();
+					updateWidget();
+				}, RENDER_INTERVAL_MS - elapsed);
+			};
+			// The per-event sink shared by all three stages: feeds the tracker (ctx
+			// usage, streaming tokens, tool-call/delta counters) + the throttled render.
+			const onProgressEvent = (event: Parameters<typeof progress.onEvent>[0], usageSink: { onEvent: (event: Parameters<typeof progress.onEvent>[0]) => void }) => {
+				progress.onEvent(event);
+				scheduleWidgetUpdate();
+				usageSink.onEvent(event);
 			};
 			clearWidget = () => {
 				if (hasUI && ui) ui.setWidget(WIDGET_NAME, undefined);
@@ -300,7 +335,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 								signal,
 								maxTurns: turnLimits.observerMaxTurnsPerRun,
 								thinkingLevel: runtime.config.thinkingLevel,
-								onEvent: (event) => observerUsage.onEvent(event),
+								onEvent: (event) => onProgressEvent(event, observerUsage),
 							});
 
 							if (records && records.length > 0) {
@@ -441,7 +476,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					updateWidget();
 					const coverageBefore = coverageTagCounts(workingReflections, workingObservations);
 					const reflectorResult = await runReflector(
-						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); reflectorUsage.onEvent(event); }, maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => onProgressEvent(event, reflectorUsage), maxTurns: turnLimits.reflectorMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 						workingReflections,
 						workingObservations,
 						(pass, max) => { progress.setPhase("reflector", pass, max); updateWidget(); },
@@ -471,7 +506,7 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 					}
 
 					const prunerResult = await runPruner(
-						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => { progress.onEvent(event); updateWidget(); prunerUsage.onEvent(event); }, maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
+						{ model: resolved.model as any, apiKey: resolved.apiKey, headers: resolved.headers, signal, onEvent: (event) => onProgressEvent(event, prunerUsage), maxTurns: turnLimits.prunerMaxTurnsPerPass, thinkingLevel: runtime.config.thinkingLevel },
 						finalReflections,
 						workingObservations,
 						runtime.config.reflectionThresholdTokens,
