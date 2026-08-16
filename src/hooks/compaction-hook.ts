@@ -191,16 +191,26 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 
 			const updateWidget = () => {
 				if (!hasUI || !ui) return;
-				if (!progress.getPhase()) {
-					ui.setWidget(WIDGET_NAME, undefined);
-					return;
+				// A render fault must never escape: the throttled trailing timer calls this
+				// OUTSIDE every try/catch of the hook — an escape there is an
+				// uncaughtException that kills the whole pi process, and a leading-render
+				// escape would cancel the compaction over a cosmetic widget fault.
+				try {
+					if (!progress.getPhase()) {
+						ui.setWidget(WIDGET_NAME, undefined);
+						return;
+					}
+					ui.setWidget(WIDGET_NAME, (_tui: any, theme: any) => {
+						return new Text(
+							progress.formatWidget(theme),
+							0, 0,
+						);
+					});
+				} catch (err) {
+					debugLog("compaction.widget_render_error", {
+						errorMessage: err instanceof Error ? err.message : String(err),
+					});
 				}
-				ui.setWidget(WIDGET_NAME, (_tui: any, theme: any) => {
-					return new Text(
-						progress.formatWidget(theme),
-						0, 0,
-					);
-				});
 			};
 			// Throttled render for the per-event hot path: a fast stream emits many
 			// message_update events, but the widget only needs a fresh line every so
@@ -234,7 +244,21 @@ export function registerCompactionHook(pi: ExtensionAPI, runtime: Runtime): void
 				usageSink.onEvent(event);
 			};
 			clearWidget = () => {
-				if (hasUI && ui) ui.setWidget(WIDGET_NAME, undefined);
+				// Cancel a still-pending trailing render: without this it fires up to
+				// RENDER_INTERVAL_MS after the compaction ended, re-showing a stale widget
+				// line over whatever pi rendered next.
+				if (trailingTimer !== null) {
+					clearTimeout(trailingTimer);
+					trailingTimer = null;
+				}
+				if (!hasUI || !ui) return;
+				try {
+					ui.setWidget(WIDGET_NAME, undefined);
+				} catch (err) {
+					debugLog("compaction.widget_render_error", {
+						errorMessage: err instanceof Error ? err.message : String(err),
+					});
+				}
 			};
 
 			let entries = branchEntries as Parameters<typeof getMemoryState>[0];

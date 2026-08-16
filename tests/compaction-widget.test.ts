@@ -165,3 +165,136 @@ describe("compaction widget ctx + streaming tokens", () => {
 		}
 	});
 });
+
+/** A stream whose message_end is the LAST event with no timer advance after it —
+ * its onProgressEvent schedules a THROTTLING TRAILING render that is still
+ * pending when the drain (and the whole compaction hook) completes. */
+function streamEndingWithPendingTrailingRender() {
+	return {
+		async *[Symbol.asyncIterator]() {
+			yield { type: "message_start", message: {} };
+			yield {
+				type: "message_update",
+				message: {},
+				assistantMessageEvent: { type: "text_delta", delta: "x".repeat(400) },
+			};
+			await vi.advanceTimersByTimeAsync(300); // flush the first trailing render
+			yield {
+				type: "message_end",
+				message: { role: "assistant", usage: { input: 900, output: 500, totalTokens: 12_345 } },
+			};
+			// NO advance: the message_end's trailing render stays pending past the
+			// end of the stream — the hook's finally must cancel it.
+		},
+		result: async () => ({}),
+	};
+}
+
+/** Register the compaction hook against a fake pi + runtime and return the
+ * captured session_before_compact handler (mirrors the fixture above). */
+function makeHookFixture() {
+	let handler: ((event: unknown, ctx: unknown) => Promise<unknown>) | undefined;
+	const pi = {
+		on: vi.fn((eventName: string, cb: typeof handler) => {
+			expect(eventName).toBe("session_before_compact");
+			handler = cb;
+		}),
+		appendEntry: vi.fn(),
+	};
+	const runtime = {
+		compactHookInFlight: false,
+		observerPromise: null,
+		resolveFailureNotified: false,
+		config: {
+			enabled: true,
+			observationThresholdTokens: 100_000, // one batch for the whole gap
+			compactionThresholdTokens: 50_000,
+			reflectionThresholdTokens: 10_000_000, // skip reflector/pruner
+			passive: true,
+			debugLog: false,
+		},
+		ensureConfig: vi.fn(),
+		resolveModel: vi.fn(async () => ({
+			ok: true,
+			model: { contextWindow: 200_000 },
+			apiKey: "test-key",
+		})),
+	};
+	registerCompactionHook(pi as never, runtime as never);
+	if (!handler) throw new Error("session_before_compact handler was not registered");
+	return { handler: handler as (event: unknown, ctx: unknown) => Promise<unknown>, pi };
+}
+
+const FIXTURE_ENTRIES = [
+	compactionEntry({
+		id: "prior-compaction",
+		firstKeptEntryId: "kept-1",
+		details: {
+			type: "observational-memory",
+			version: 4,
+			observations: [observation],
+			reflections: [],
+		},
+	}),
+	messageEntry({ id: "kept-1", message: { role: "user", content: "start of kept tail" } }),
+	messageEntry({ id: "raw-1", message: { role: "user", content: "raw tail content" } }),
+	messageEntry({ id: "new-boundary", message: { role: "user", content: "boundary" } }),
+];
+
+function hookCtx(setWidget: unknown) {
+	return {
+		cwd: "/tmp/project",
+		hasUI: true,
+		ui: { notify: vi.fn(), setWidget },
+		sessionManager: { getBranch: vi.fn(() => FIXTURE_ENTRIES) },
+	};
+}
+
+const HOOK_EVENT = {
+	preparation: { firstKeptEntryId: "new-boundary", tokensBefore: 50000 },
+	branchEntries: FIXTURE_ENTRIES,
+	signal: undefined,
+};
+
+describe("compaction widget render-fault hardening", () => {
+	it("a throwing ui.setWidget never escapes the hook (no uncaught render fault, compaction still completes)", async () => {
+		vi.useFakeTimers();
+		try {
+			agentLoopMock.mockReset();
+			agentLoopMock.mockImplementation(() => streamingAgentStream());
+			const { handler } = makeHookFixture();
+			// Every render path (leading, throttled trailing, phase-change, clear)
+			// throws — none may propagate out of the hook (the trailing timer runs
+			// outside every try/catch: an escape there is an uncaughtException that
+			// kills the whole pi process).
+			const setWidget = vi.fn(() => {
+				throw new Error("render boom");
+			});
+			const result = await handler(HOOK_EVENT, hookCtx(setWidget));
+			expect(agentLoopMock).toHaveBeenCalled();
+			expect(result).toBeTruthy(); // compaction ran to completion despite the render faults
+			// The trailing render fired (and was caught) during streaming.
+			await vi.advanceTimersByTimeAsync(300);
+			expect(setWidget.mock.calls.length).toBeGreaterThan(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("the pending trailing render is cancelled when the compaction ends (no post-completion render)", async () => {
+		vi.useFakeTimers();
+		try {
+			agentLoopMock.mockReset();
+			agentLoopMock.mockImplementation(() => streamEndingWithPendingTrailingRender());
+			const { handler } = makeHookFixture();
+			const setWidget = vi.fn();
+			await handler(HOOK_EVENT, hookCtx(setWidget));
+			// A trailing render is pending here (message_end was the last event).
+			const callsAtCompletion = setWidget.mock.calls.length;
+			await vi.advanceTimersByTimeAsync(500);
+			expect(setWidget.mock.calls.length).toBe(callsAtCompletion); // cancelled, not fired
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
