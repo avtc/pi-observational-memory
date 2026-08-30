@@ -3,7 +3,7 @@
  * cluster: the widget line must surface the compaction agent's own context
  * consumption ({used}/{window}) and the live streaming output-token counter
  * (two-tier: provider-streamed usage.output max + chars/4 delta fallback),
- * mirroring the memkeeper widget's trailing runtime cluster.
+ * mirroring the session-owl widget's trailing runtime cluster.
  */
 import { describe, expect, it, vi } from "vitest";
 
