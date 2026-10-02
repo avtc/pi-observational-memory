@@ -167,9 +167,10 @@ ${conversation}`;
 		},
 	];
 
+	// pi ≥0.87: AgentContext.systemPrompt was removed — the prompt rides as the
+	// transcript's leading system message instead.
 	const context: AgentContext = {
-		systemPrompt: OBSERVER_SYSTEM,
-		messages: [],
+		messages: [{ role: "system", content: OBSERVER_SYSTEM, timestamp: Date.now() }],
 		tools: [recordObservations as AgentTool<any>],
 	};
 

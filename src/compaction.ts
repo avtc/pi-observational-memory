@@ -606,9 +606,10 @@ Crystallize long-lived reflections from the full observation pool for this pass.
 		},
 	];
 
+	// pi ≥0.87: AgentContext.systemPrompt was removed — the prompt rides as the
+	// transcript's leading system message instead.
 	const context: AgentContext = {
-		systemPrompt: REFLECTOR_SYSTEM,
-		messages: [],
+		messages: [{ role: "system", content: REFLECTOR_SYSTEM, timestamp: Date.now() }],
 		tools: [recordTool as AgentTool<any>],
 	};
 
@@ -625,11 +626,14 @@ Crystallize long-lived reflections from the full observation pool for this pass.
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-		shouldStopAfterTurn: () => {
+		// pi ≥0.87: finishTurn replaces shouldStopAfterTurn; error/aborted turns are
+		// hard exits — return undefined without counting them.
+		finishTurn: (turn) => {
+			if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
 			turnCount++;
-			if (effectiveMaxTurns !== undefined && turnCount >= effectiveMaxTurns) return true;
-			if (consecutiveEmptyCalls >= 2) return true;
-			return false;
+			if (effectiveMaxTurns !== undefined && turnCount >= effectiveMaxTurns) return { action: "end" };
+			if (consecutiveEmptyCalls >= 2) return { action: "end" };
+			return undefined;
 		},
 	};
 
@@ -860,9 +864,10 @@ Decide which observations to remove from the kept set. Call drop_observations wi
 		},
 	];
 
+	// pi ≥0.87: AgentContext.systemPrompt was removed — the prompt rides as the
+	// transcript's leading system message instead.
 	const context: AgentContext = {
-		systemPrompt: PRUNER_SYSTEM,
-		messages: [],
+		messages: [{ role: "system", content: PRUNER_SYSTEM, timestamp: Date.now() }],
 		tools: [dropTool as AgentTool<any>],
 	};
 
@@ -879,11 +884,14 @@ Decide which observations to remove from the kept set. Call drop_observations wi
 		convertToLlm: (msgs) => msgs as Message[],
 		toolExecution: "sequential",
 		...(reasoning && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
-		shouldStopAfterTurn: () => {
+		// pi ≥0.87: finishTurn replaces shouldStopAfterTurn; error/aborted turns are
+		// hard exits — return undefined without counting them.
+		finishTurn: (turn) => {
+			if (turn.message.stopReason === "error" || turn.message.stopReason === "aborted") return undefined;
 			turnCount++;
-			if (effectiveMaxTurns !== undefined && turnCount >= effectiveMaxTurns) return true;
-			if (consecutiveEmptyCalls >= 2) return true;
-			return false;
+			if (effectiveMaxTurns !== undefined && turnCount >= effectiveMaxTurns) return { action: "end" };
+			if (consecutiveEmptyCalls >= 2) return { action: "end" };
+			return undefined;
 		},
 	};
 
